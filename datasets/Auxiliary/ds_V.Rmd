@@ -1,0 +1,35 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+```
+
+```{r}
+configs <- expand.grid(
+  ngenes = c(100, 200, 500),
+  ncells = c(500, 750, 1000),
+  seed = 1:8
+) %>% split(., seq(nrow(.)))
+
+for (conf in configs) {
+  c(ngenes, ncells, seed) %<-% conf
+  ds_name <- sprintf("grn_%dcells_%dgenes_%d", ncells, ngenes, seed)
+  cat(ds_name %+% "\n")
+  
+  options_ <- .res_opt(
+    rand.seed = seed,
+    GRN = GRN_params_100,
+    # GRN = NA,
+    num.genes = ngenes,
+    num.cells = ncells,
+    num.cifs = 500,
+    tree = Phyla3(),
+    diff.cif.fraction = 0.8,
+    do.velocity = F
+  )
+  
+  results <- sim_true_counts(options_)
+  
+  write_files(results, ds_name)
+}
+```

@@ -1,0 +1,128 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+```
+
+```{r}
+library(slingshot, quietly = T)
+library(uwot, quietly = T)
+library(mclust, quietly = TRUE)
+
+.output_grn_res <- function(res, root, noise = F) {
+  dir.create(root, recursive = T)
+  
+  counts <- if (noise) {
+    log2(res$counts_obs + 1)
+  } else {
+    log2(res$counts + 1)
+  }
+  
+  rownames(counts) <- paste0("gene", 1:res$.n$gene)
+  colnames(counts) <- paste0("cell", 1:res$.n$cell)
+  write.csv(counts, file = file.path(root, "ExpressionData.csv"), quote = F)
+  
+  sce <- SingleCellExperiment(assays = List(counts = counts))
+  FQnorm <- function(counts){
+    rk <- apply(counts,2,rank,ties.method='min')
+    counts.sort <- apply(counts,2,sort)
+    refdist <- apply(counts.sort,1,median)
+    norm <- apply(rk,2,function(r){ refdist[r] })
+    rownames(norm) <- rownames(counts)
+    return(norm)
+  }
+  assays(sce)$norm <- FQnorm(assays(sce)$counts)
+  
+  pca <- prcomp(t(log1p(assays(sce)$norm)), scale. = FALSE)
+  rd1 <- pca$x[,1:2]
+  
+  rd2 <- uwot::umap(t(log1p(assays(sce)$norm)))
+  colnames(rd2) <- c('UMAP1', 'UMAP2')
+  reducedDims(sce) <- SimpleList(PCA = rd1, UMAP = rd2)
+  
+  cl1 <- Mclust(rd2)$classification
+  colData(sce)$GMM <- cl1
+  
+  cl2 <- kmeans(rd2, centers = 4)$cluster
+  colData(sce)$kmeans <- cl2
+  
+  sce <- slingshot(sce, clusterLabels = 'GMM', reducedDim = 'UMAP')
+  
+  time <- list()
+  i = 1
+  while (T) {
+    k <- sprintf("slingPseudotime_%d", i)
+    if (is.null(sce[[k]])) {
+      break
+    } else {
+      time[[sprintf("Pseudotime_%d", i)]] <- sce[[k]]
+    }
+    i <- i + 1
+  }
+  
+  time <- as.data.frame(time)
+  rownames(time) <- colnames(res$counts)
+  write.csv(time, file = file.path(root, "PseudoTime.csv"), quote = F)
+  
+  gp <- res$.grn$params
+  grn <- data.frame(
+    Gene1 = paste0("gene", gp[,2]),
+    Gene2 = paste0("gene", gp[,1]),
+    Type = ifelse(gp[,3] > 0, "+", "-"))
+  write.csv(grn, file = file.path(root, "refNetwork.csv"), quote = F, row.names = F)
+  
+  saveRDS(res, file.path(root, "res.rds"))
+}
+```
+
+## Simulation
+
+```{r}
+library(doParallel)
+registerDoParallel(cores = 8)
+
+(function() {
+  foreach (seed = 1:8) %dopar% {
+    options_ <- list(
+      rand.seed = seed,
+      threads = 1,
+      GRN = GRN_params_100,
+      num.cells = 1000,
+      num.cifs = 50,
+      tree = Phyla1(),
+      intrinsic.noise = 1,
+      diff.cif.fraction = 0.2,
+      debug = F
+    )
+
+    results <- sim_true_counts(options_)
+
+    .output_grn_res(results, "/home/[USER]/scMultiSim/bench/grn/r0.2/grn100_" %+% as.character(seed), F)
+    gc()
+  }
+})()
+
+(function() {
+  foreach (seed = 1:8) %dopar% {
+    options_ <- list(
+      rand.seed = seed,
+      threads = 1,
+      GRN = GRN_params_100,
+      num.cells = 1000,
+      num.cifs = 50,
+      tree = Phyla1(),
+      intrinsic.noise = 1,
+      diff.cif.fraction = 0.2,
+      debug = F
+    )
+
+    results <- sim_true_counts(options_)
+    add_expr_noise(results)
+    divide_batches(results)
+
+    .output_grn_res(results, "/home/[USER]/scMultiSim/bench/grn/r0.2/grn100_noise_" %+% as.character(seed), T)
+    gc()
+  }
+})()
+
+```

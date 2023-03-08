@@ -1,0 +1,84 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../../utils.R")
+library(SpaTalk)
+```
+
+```{r}
+run_spatalk <- function (root_dir){
+  sc_st_data <- read.csv(file.path(root_dir, 'counts.csv'), row.name = 'X')
+  sc_meta_large <- read.csv(file.path(root_dir, 'cell_info.csv'), row.name = 'X')
+  st_meta <- read.csv(file.path(root_dir, 'spatalk_sc_st_data.csv'))
+  lrpairs_large <- read.csv(file.path(root_dir, 'lrpair.csv'), row.name = 'X')
+  pathways <- read.csv(file.path(root_dir, 'pathway.csv'), row.name = 'X')
+  
+  ncell <- ncol(sc_st_data)
+  ngene <- nrow(sc_st_data)
+  cell_names <- colnames(sc_st_data) <- paste0("cell", 1:ncell)
+  gene_names <- rownames(sc_st_data) <- paste0("gene", 1:ngene)
+  st_meta[, 1] <- cell_names
+  colnames(st_meta) <- c("cell", "x", "y")
+  sc_st_data <- log2(sc_st_data + 1)
+  
+  pathways$src_tf <- "NO"
+  pathways$dest_tf <- "NO"
+  tf_genes <- sapply(strsplit(pathways$dest, "ne"), \(i) as.integer(i[2])) <= 53
+  pathways[tf_genes, "dest_tf"] <- "YES"
+  
+  obj <- createSpaTalk(st_data = data.matrix(sc_st_data), st_meta = st_meta,
+                       species = "Human", if_st_is_sc = T, spot_max_cell = 1)
+  obj <- dec_celltype(object = obj, sc_data = data.matrix(sc_st_data),
+                      sc_celltype = sc_meta_large$cell.type)
+  obj@meta$rawmeta$celltype <- sc_meta_large$cell.type
+  
+  obj <- find_lr_path(object = obj, lrpairs = lrpairs_large, pathways = pathways)
+  # obj <- dec_cci_all(object = obj, if_doParallel = F, co_exp_ratio = 0,)
+  obj <- dec_cci_all(object = obj)
+  
+  ctpairs <- strsplit(names(obj@cellpair), " -- ")
+  res <- matrix(0, nrow(lrpairs_large), length(ctpairs))
+  rownames(res) <- paste0(lrpairs_large[,1], "-", lrpairs_large[,2])
+  colnames(res) <- sapply(ctpairs, function(ctpair) {
+    n1 <- sc_meta_large[sc_meta_large$cell.type == ctpair[1], 'cell.type.idx'][1]
+    n2 <- sc_meta_large[sc_meta_large$cell.type == ctpair[2], 'cell.type.idx'][1]
+    paste0("CT", n1, "-", "CT", n2)
+  })
+  
+  i <- 0
+  for (ctpair in ctpairs) {
+    i <- i + 1
+    for (j in 1:nrow(lrpairs_large)) {
+      lrpair <- lrpairs_large[j, ]
+      pval <- plot_lrpair_vln(obj,
+                              celltype_sender = ctpair[[1]],
+                              celltype_receiver = ctpair[[2]],
+                              ligand = lrpair[[1]],
+                              receptor = lrpair[[2]])
+      
+      # obj_lr_path <- get_lr_path(object = obj,
+      #                            celltype_sender = ctpair[[1]],
+      #                            celltype_receiver = ctpair[[2]],
+      #                            ligand = lrpair[[1]],
+      #                            receptor = lrpair[[2]])
+      # browser()
+      # res[paste0(lrpair[,1], "-", lrpair[,2]), i] <- obj_lr_path$path_pvalue$pvalue
+      res[paste0(lrpair[,1], "-", lrpair[,2]), i] <- pval
+    }
+  }
+  
+  res
+}
+```
+
+```{r}
+(\() {
+  for (seed in 1:12) {
+    root_dir <- sprintf("/home/[USER]/scMultiSim/bench/cci/cci4_%d/", seed)
+    res <- run_spatalk(root_dir)
+    write.csv(res, file.path(root_dir, "spatalk_result.csv"))
+  }
+})()
+```

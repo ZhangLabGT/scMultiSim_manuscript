@@ -1,0 +1,37 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../utils.R")
+```
+
+(c) Continuous data (MT3a)
+
+```{r}
+res <- read_res(configs3[[3]])
+
+plot_tsne(log2(res$counts + 1), res$cell_meta$pop, rand.seed = 0)
+plot_tsne(log2(res$atacseq_data + 1), res$cell_meta$pop, rand.seed = 0)
+```
+
+
+(c) Discrete data (MT9a)
+
+```{r}
+res <- read_res(configs5[[3]])
+
+plot_tsne(log2(res$counts + 1), res$cell_meta$pop, rand.seed = 0)
+plot_tsne(log2(res$atacseq_data + 1), res$cell_meta$pop, rand.seed = 0)
+```
+
+(g) With tech. noise and batch effects
+
+```{r}
+res <- read_res(configs5[[9]])
+divide_batches(res, effect = 2)
+
+plot_tsne(log2(res$counts + 1), res$cell_meta$pop, rand.seed = 0)
+plot_tsne(log2(res$counts_obs + 1), res$cell_meta$pop, rand.seed = 0)
+plot_tsne(log2(res$counts_with_batches + 1), res$cell_meta$pop, rand.seed = 0, label2 = res$cell_meta$batch)
+```

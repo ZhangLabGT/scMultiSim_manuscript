@@ -1,0 +1,220 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../utils.R")
+```
+
+```{r}
+library(cidr)
+library(monocle3)
+library(scater)
+library(SC3)
+# devtools::load_all("~/bench/seurat/")
+library(Seurat)
+library(TSCAN)
+
+.cls_cidr <- function(sce, params, k) {
+  tryCatch({
+    set.seed(1)
+    dat <- counts(sce)
+    sData <- scDataConstructor(dat, tagType = "raw")
+    sData <- determineDropoutCandidates(sData)
+    sData <- wThreshold(sData)
+    sData <- scDissim(sData, threads = 1)
+    sData <- scPCA(sData, plotPC = FALSE)
+    sData <- nPC(sData)
+    
+    ## Cluster with preset number of clusters
+    sDataC <- scCluster(object = sData, nCluster = k, 
+                        nPC = sData@nPC, cMethod = "ward.D2")
+    cluster <- sDataC@clusters
+    names(cluster) <- colnames(sDataC@tags)
+    ## Determine number of clusters automatically
+    sDataA <- scCluster(object = sData, n = max(params$range_clusters),
+                        nPC = sData@nPC, cMethod = "ward.D2")
+    est_k <- sDataA@nCluster
+    
+    list(cluster = cluster, est_k = est_k)
+  } , error = function(e) {
+    list(cluster = NULL, est_k = NA)
+  })
+}
+
+.cls_sc3 <- function(sce, params, k) {
+  tryCatch({
+    # (seed <- round(1e6*runif(1)))
+    seed <- 1
+    rowData(sce)$feature_symbol <- rownames(counts(sce))
+    dat <- sc3_prepare(sce, gene_filter = params$gene_filter, 
+                       pct_dropout_min = params$pct_dropout_min, 
+                       pct_dropout_max = params$pct_dropout_max, 
+                       svm_max = 1e6, n_cores = 1, rand_seed = seed)
+    est_k <- metadata(sc3_estimate_k(dat))$sc3$k_estimation
+    dat <- sc3(dat, ks = k, pct_dropout_min = params$pct_dropout_min,
+               pct_dropout_max = params$pct_dropout_max,
+               gene_filter = params$gene_filter, rand_seed = seed, n_cores = 1,
+               biology = FALSE, k_estimator = FALSE, svm_max = 1e6)
+    cluster <- as.numeric(colData(dat)[, paste0("sc3_", k, "_clusters")])
+    names(cluster) <- rownames(colData(dat))
+    list(cluster = cluster, est_k = est_k)
+  } , error = function(e) {
+    list(cluster = NULL, est_k = NA)
+  })
+}
+
+.cls_monocle3 <- function(sce, params, k) {
+  tryCatch({
+    set.seed(1)
+    cds <- new_cell_data_set(counts(sce))
+    cds <- preprocess_cds(cds, num_dim = params$num_dim)
+    cds <- reduce_dimension(cds, reduction_method = "UMAP")
+    cds <- cluster_cells(cds, resolution=k, reduction_method = "UMAP")
+  
+    cluster <- clusters(cds, "UMAP")
+    names(cluster) <- colnames(cds)
+    list(cluster = cluster, est_k = NA)
+  } , error = function(e) {
+    list(cluster = NULL, est_k = NA)
+  })
+}
+
+.cls_seurat <- function(sce, params, resolution) {
+  tryCatch({
+    # (seed <- round(1e6*runif(1)))
+    seed <- 1
+    dat <- counts(sce)
+    data <- CreateSeuratObject(dat, min.cells = params$min.cells,
+                               min.features = params$min.genes)
+    data <- NormalizeData(object = data)
+    data <- ScaleData(object = data)
+    data <- FindVariableFeatures(data)
+    data <- RunPCA(object = data, features = VariableFeatures(data), seed.use = seed)
+    data <- FindNeighbors(data, dims = 1:10)
+    data <- FindClusters(data, resolution = resolution)
+  
+    cluster <- Idents(data)
+    list(cluster = cluster, est_k = NA)
+  } , error = function(e) {
+    list(cluster = NULL, est_k = NA)
+  })
+}
+
+.cls_tscan <- function(sce, params, k) {
+  tryCatch({
+    set.seed(1)
+    dat <- logcounts(sce)
+    ## Remove genes with variance = 0
+    dat <- dat[rowVars(dat) > 0, ]
+    cluster <- exprmclust(dat, clusternum = k, modelNames = "VVV", reduce = TRUE)$clusterid
+    ## Determine number of clusters automatically
+    est_k <- length(unique(exprmclust(dat, clusternum = params$range_clusters, 
+                                      modelNames = "VVV", reduce = TRUE)$clusterid))
+    list(cluster = cluster, est_k = est_k)
+  } , error = function(e) {
+    list(cluster = NULL, est_k = NA)
+  })
+}
+
+.cls_pcakmeans <- function(sce, params, k) {
+  dat <- logcounts(sce)
+  pca <- prcomp(t(dat), center = TRUE, scale. = FALSE)
+  pca <- pca$x[, seq_len(params$nPC), drop = FALSE]
+  cluster <- kmeans(pca, centers = k, nstart = 25)$cluster
+  names(cluster) = colnames(dat)
+  
+  list(cluster = cluster, est_k = NA)
+}
+```
+
+```{r}
+library(doParallel)
+registerDoParallel(cores = 4)
+
+cls_rtesult <- (function(){
+  get_cls_result <- function(conf, noise = T) {
+    root <- .conf_path(conf, "cluster")
+    dir.create(root, showWarnings = F)
+    message(root)
+    
+    res <- read_res(conf)
+    counts <- if (noise) {
+      res$counts_obs
+    } else {
+      res$counts
+    }
+    
+    range_resolutions_seurat <- c(c(0.0001, 0.0002, 0.0004, 0.0006, 0.0008, 0.001), seq(0.4, 1.2, by = 0.2), seq(1.3, 3, by = 0.1))
+    range_clusters <- 2:8
+    
+    rownames(counts) <- paste0("gene", 1:res$.n$gene)
+    colnames(counts) <- paste0("cell", 1:res$.n$cell)
+    
+    sce <- SingleCellExperiment(assays = List(counts = counts))
+    sce <- scuttle::logNormCounts(sce)
+    gt <- res$cell_meta$pop
+    df <- list()
+  
+    get_ari <- function(result, k, method) {
+      if (is.null(result$cluster)) return()
+      ari <- mclust::adjustedRandIndex(result$cluster, gt)
+      res_df <- list(ari = ari, k = k, method = method, labels = result)
+      df <<- c(df, list(res_df))
+    }
+
+    for (k in range_clusters) {
+      cat(sprintf("%g ", k))
+      .cls_pcakmeans(sce, list(nPC = 20), k) %>% get_ari(k, "PCAKmeans") %>% get_ari(k, "PCAKmeans")
+      .cls_cidr(sce, list(
+        range_clusters = 2:10), k) %>% get_ari(k, "CIDR")
+      .cls_sc3(sce, list(
+        pct_dropout_min = 0, pct_dropout_max = 100, gene_filter = FALSE), k) %>% get_ari(k, "SC3")
+      .cls_tscan(sce, list(
+        range_clusters = 2:10), k) %>% get_ari(k, "TSCAN")
+    }
+    
+    for (k in range_resolutions_seurat) {
+      cat(sprintf("%g ", k))
+      .cls_seurat(sce, list(
+        min.cells = 0, min.genes = 0, dims.use = 1:30), k) %>% get_ari(k, "Seurat")
+    }
+    
+    saveRDS(df, file.path(root, "res.rds"))
+  }
+  
+  foreach (conf = configs5) %dopar% {
+    df <- get_cls_result(conf)
+    gc()
+    df
+  }
+})()
+```
+
+
+```{r}
+df1 <- NULL; df_seurat <- NULL
+for (i in seq_along(cls_rtesult)) {
+  if (configs5[[i]]$sigma == 0.1) next
+  x <- cls_rtesult[[i]]
+  for (y in x) {
+  if (y$method == "Seurat") {
+    k <- length(unique(y$labels$cluster))
+    df1 <- rbind(df1, data.frame(ari = y$ari, k = k, method = y$method))
+    df_seurat <- rbind(df_seurat, data.frame(ari = y$ari, k = k, res = y$k))
+  } else {
+    df1 <- rbind(df1, data.frame(ari = y$ari, k = y$k, method = y$method))
+  }
+  }
+}
+df3 <- df3[df3$k >= 2 & df3$k <= 8,]
+```
+
+```{r}
+df1$k <- factor(df1$k)
+
+ggplot(df1, aes(x=k, y=ari, fill=method)) + geom_boxplot() + ylim(0, 1)
+
+df_seurat$res <- factor(df_seurat$res)
+ggplot(df_seurat, aes(x=res, y=k)) + geom_boxplot()
+```

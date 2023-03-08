@@ -1,0 +1,167 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../utils.R")
+```
+
+
+```{r}
+library(dyno)
+library(tidyverse)
+```
+
+## Metrics
+
+```{r}
+# Correlation
+corr_branch <- function(pst, gt, pop) {
+  L1 <- c("4_5", "5_2") 
+  L2 <- c("4_5", "5_3")
+  L3 <- c("4_1")
+  
+  s <- numeric()
+  for (L in list(L1, L2, L3)) {
+    cells <- which(pop %in% L)
+    s <- c(s, cor(gt[cells], pst[cells], method = "pearson") ^ 2)
+  }
+  mean(s)
+}
+
+jaccard <- function(a, b) {
+  I = length(intersect(a, b))
+  U = length(a) + length(b) - I
+  I / U
+}
+
+# KNN Purity
+knnp <- function(pst, gt, pop, k = 50) {
+  L1 <- c("4_5", "5_2") 
+  L2 <- c("4_5", "5_3")
+  L3 <- c("4_1")
+  
+  s <- numeric()
+  for (L in list(L1, L2, L3)) {
+    cells <- which(pop %in% L)
+    gt_nb <- get.knn(gt[cells], k = k)$nn.index
+    ps_nb <- get.knn(pst[cells], k = k)$nn.index
+    for (i in seq_along(cells)) {
+      s <- c(s, jaccard(gt_nb[i,], ps_nb[i,]))
+    }
+  }
+  mean(s)
+}
+```
+
+## Run methods
+
+```{r}
+global_ti_res <- NULL
+
+output_ti_res <- function(conf, noise = F) {
+  root <- .conf_path(conf, "ti")
+  cat(sprintf("%s\n", root))
+  res <- read_res(conf)
+  dir.create(root, showWarnings = F, recursive = T)
+  
+  dataset <- wrap_expression(
+    counts = t(res$counts),
+    expression = t(log2(res$counts + 1))
+  )
+  root_cell <- names(sort(setNames(res$cell_meta$depth, seq_along(res$cell_meta$depth)))) %>% paste0("cell", .)
+  print(head(root_cell))
+  dataset <- dataset %>%
+    add_prior_information(start_id = root_cell[1], start_n = 1, end_n = 3)
+  set.seed(0)
+  models <- dynwrap::infer_trajectories(
+    dataset,
+    give_priors = c("start_id", "start_n", "end_n"),
+    method = list2(
+      ti_slingshot(),
+      ti_mst(),
+      ti_pcreode(),
+      ti_monocle_ica(),
+      ti_paga_tree(),
+    ),
+    verbose = F
+  )
+  saveRDS(models, file.path(root, "res.rds"))
+  
+  # models <- readRDS(file.path(root, "res.rds"))
+  
+  corr_list <- numeric()
+  corb_list <- numeric()
+  knnp_list <- numeric()
+  for (i in seq(nrow(models))) {
+    cat(sprintf("model_%g\n", i))
+    
+    model <- models[i,]$model[[1]]
+    root <- NULL
+    for (r in root_cell) {
+      if (r %in% model$cell_ids) {
+        root <- r; break
+      }
+    }
+    message(paste0("root: ", root))
+    
+    model <- add_root(model, root_cell_id = root)
+    gt <- setNames(res$cell_meta$depth, paste0("cell", seq_along(res$cell_meta$depth)))
+    gt <- gt[model$cell_ids]
+    pop <- setNames(res$cell_meta$pop, paste0("cell", seq_along(res$cell_meta$pop)))
+    pop <- pop[model$cell_ids]
+    pst <- calculate_pseudotime(model)
+    corr <- cor(gt, pst, method = "pearson") ^ 2
+    corb <- corr_branch(pst, gt, pop)
+    kp <- knnp(pst, gt, pop)
+    corr_list <- c(corr_list, corr)
+    corb_list <- c(corb_list, corb)
+    knnp_list <- c(knnp_list, kp)
+  }
+  
+  list(c(corr_list), c(knnp_list), c(corb_list), models$method_name)
+}
+
+ti_res <- lapply(c(1:48), function(i) {
+  conf <- configs3[[i]]
+  res <- output_ti_res(conf)
+  if (is.null(res)) return
+  df <- data.frame(
+    idx = i,
+    corr = res[[1]],
+    knnp = res[[2]],
+    corb = res[[3]],
+    method = res[[4]]
+  )
+  if (is.null(global_ti_res)) {
+    global_ti_res <<- df
+  } else {
+    global_ti_res <<- rbind(global_ti_res, df)
+  }
+  df
+}) %>% do.call(rbind, .)
+
+# write.csv(global_ti_res, "~/scMultiSim/bench/unif/tj_res1.csv")
+```
+
+## Plot
+
+```{r}
+ds_0.1 <- which(sapply(configs3, \(x) x$sigma) == 0.5)
+df <- global_ti_res[global_ti_res$idx %in% ds_0.1,]
+# df$corr <- df$corr * df$corr
+
+df <- global_ti_res
+df$method <- factor(df$method, c("Monocle ICA", "MST", "Slingshot", "pCreode", "PAGA Tree"))
+
+boxplot(corb ~ method, df, ylab="", xlab="", ylim=c(0,1), horizontal=T)
+boxplot(knnp ~ method, df, ylab="", xlab="", ylim=c(0,0.8), horizontal = T)
+```
+
+```{r}
+ti_res_linear <- read.csv("~/scMultiSim/bench/unif/tj_res2.csv")
+ti_res_linear$method <- factor(ti_res_linear$method, c("Slingshot", "Monocle ICA", "TSCAN"))
+ti_res_linear$corr <- ti_res_linear$corr ^ 2
+ggplot(ti_res_linear[1:3,], aes(x = method, y = corr, fill = method)) + geom_bar(stat="identity")
+boxplot(corr ~ method, ti_res_linear, ylab="", xlab="", ylim=c(0,1))
+```

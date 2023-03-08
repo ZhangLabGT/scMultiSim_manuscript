@@ -1,0 +1,62 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../utils.R")
+```
+
+(e) Effect of $\sigma_i$ and $r_d$
+
+```{r}
+# intr diff sigma
+# 1    0.2  0.5 -> 47
+# 1    0.8  0.5 -> 41
+# 0.5  0.8  0.5 -> 38
+for (i in c(47, 41, 38)) {
+  res <- readRDS(.ds_A_name(configs_a[[i]], "res.rds"))
+  plot_tsne(log2(res$counts + 1), res$cell_meta$pop) %>% print()
+}
+```
+
+(f) ATAC-RNA correlation
+
+```{r}
+corr_list <- (function(){
+  data_df <- data.frame(x = numeric(), af = numeric())
+
+  for (conf in configs_a) {
+    if (!conf$dis) {
+    res <- readRDS(.ds_A_name(conf, "res.rds"))
+    corr <- Get_1region_ATAC_correlation(res$counts, res$atacseq_data, res$region_to_gene)
+    data_df <- rbind(data_df, data.frame(x = corr, af = conf$af))
+    }
+  }
+
+  data_df
+})()
+
+boxplot(x~af, data = corr_list, ylim = c(0, 0.5))
+```
+
+(h) Velocity
+
+```{r}
+options_ <- list2(
+  rand.seed = 2,
+  threads = 1,
+  GRN = GRN_params_100,
+  num.genes = 500,
+  num.cells = 1000,
+  num.cifs = 50,
+  cif.sigma = 1,
+  tree = Phyla5(),
+  do.velocity = T
+)
+
+results <- sim_true_counts(options_)
+
+plot_tsne(log2(results$counts + 1), labels = results$cell_meta$pop)
+plot_tsne(log2(results$unspliced_counts + 1), labels = results$cell_meta$pop)
+plot_rna_velocity(results, arrow.length = 2)
+```

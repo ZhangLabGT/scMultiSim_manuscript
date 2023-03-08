@@ -1,0 +1,262 @@
+```{r}
+gc()
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../../utils.R")
+
+library(rliger)
+library(Seurat)
+library(stringr)
+```
+
+# UINMF
+
+```{r}
+uinmf_integ <- function(ds_path, conf) {
+  res <- readRDS(ds_path)
+  # divide_batches(res, nbatch = 3)
+  
+  cnt <- t(res$counts_obs)
+  atac_cnt <- t(res$atac_obs)
+  mt <- res$meta
+  
+  r2g <- res$region_to_gene
+  genes <- rownames(cnt) <- colnames(r2g) <- paste0("gene", 1:nrow(cnt))
+  regions <- rownames(atac_cnt) <- rownames(r2g) <- paste0("region", 1:nrow(atac_cnt))
+  cells <- colnames(cnt) <- colnames(atac_cnt) <- rownames(mt) <- paste0("cell", 1:ncol(cnt), "_type", mt$pop)
+  
+  b1 <- mt$batch == 1; b2 <- mt$batch == 2; b3 <- mt$batch == 3
+  cnt_b1 <- cnt[, b1]; cnt_b2 <- cnt[, b2]; cnt_b3 <- cnt[, b3]
+  atac_b1 <- atac_cnt[, b1]; atac_b2 <- atac_cnt[, b2]; atac_b3 <- atac_cnt[, b3]
+  mt_b1 <- mt[b1, ]; mt_b2 <- mt[b2, ]; mt_b3 <- mt[b3, ]
+  
+  act_b2 <- t(r2g) %*% atac_b2
+  
+  liger_bin <- createLiger(list(peak1 = atac_b1, peak2 = atac_b2), remove.missing = FALSE)
+  liger_bin <- normalize(liger_bin)
+  
+  # use all regions as variable regions
+  top_regions <- unlist(regions)
+  liger_bin <- selectGenes(liger_bin)
+  liger_bin@var.genes <- top_regions
+  
+  liger_bin <- scaleNotCenter(liger_bin)
+  unshared_atac1 = liger_bin@scale.data$peak1
+  unshared_atac2 = liger_bin@scale.data$peak2
+  
+  ifnb_liger <- createLiger(list(rna1 = cnt_b1, rna2 = act_b2, rna3 = cnt_b3), remove.missing = FALSE)
+  ifnb_liger <- normalize(ifnb_liger)
+  # for protein we don't select has there are only 216 proteins
+  ifnb_liger <- selectGenes(ifnb_liger)
+  # scale the data
+  ifnb_liger <- scaleNotCenter(ifnb_liger)
+  
+  ifnb_liger@var.unshared.features[[1]] = colnames(unshared_atac1)
+  ifnb_liger@scale.unshared.data[[1]] = t(unshared_atac1)
+  ifnb_liger@var.unshared.features[[2]] = colnames(unshared_atac2)
+  ifnb_liger@scale.unshared.data[[2]] = t(unshared_atac2)
+  # k <- suggestK(ifnb_liger, num.cores = 8)
+  
+  # k <- switch (paste0(conf$tree, "_", conf$sigma),
+  #   "1_0.1" = 35,
+  #   "1_0.5" = 50,
+  #   "3_0.1" = 40,
+  #   "3_0.5" = 50,
+  #   "5_0.1" = 25,
+  #   "5_0.5" = 35
+  # )
+  k <- 15
+  print(paste0("Use k = ", k))
+  
+  # Joint matrix factorization
+  ifnb_liger <- optimizeALS(ifnb_liger, k = k, use.unshared = TRUE, max_iters =30,thresh=1e-10)
+  
+  ifnb_liger <- quantile_norm(ifnb_liger)
+  H1 <- ifnb_liger@H$rna1
+  H2 <- ifnb_liger@H$rna2
+  H3 <- ifnb_liger@H$rna3
+  
+  H.norm <- ifnb_liger@H.norm 
+  H.norm1 <- H.norm[1:sum(b1),]
+  H.norm2 <- H.norm[(sum(b1) + 1):(sum(b1) + sum(b2)),]
+  H.norm3 <- H.norm[(sum(b1) + sum(b2) + 1):nrow(H.norm),]
+  
+  lst(H1, H2, H3, H.norm1, H.norm2, H.norm3, mt_b1, mt_b2, mt_b3)
+}
+
+```
+
+```{r}
+(\() {
+  write.ds <- function(res_dir) {
+    res_path <- file.path(res_dir, "out_uinmf")
+    dir.create(res_path, recursive = T)
+    keys <- c("q_meta", "ref_meta", "q_umap", "ref_umap", "q_embed", "ref_embed", "counts")
+    obj <- list()
+    for (k in keys) {
+      fn <- paste0(k, ".csv")
+      obj[[k]] <- (function (fn, res_path) {
+        force(fn); force(res_path)
+        function(data) {
+          write.csv(data, file.path(res_path, fn),  row.names = F, quote = F)
+        }
+      })(fn, res_path)
+    }
+    obj
+  }
+  
+  counter <- 0
+  
+  for (conf in config_all) {
+    if (!res_exist(conf)) next
+    
+    ds_path <- .conf_path(conf, "integ/integ.rds")
+    counter <- counter + 1
+    cat(sprintf("[%2d] %s\n", counter, ds_path))
+    cat("1", file = .conf_path(conf, "have_uinmf"), append = T)
+    
+    u <- uinmf_integ(ds_path, conf)
+    
+    out_dir <- .conf_path(conf, "integ")
+    w <- write.ds(out_dir)
+    w$q_meta(u$mt_b2)
+    w$ref_meta(u$mt_b3)
+    w$q_embed(u$H.norm2 %>% t())
+    w$ref_embed(u$H.norm3 %>% t())
+  }
+})()
+```
+
+## Seurat Bridge Integration
+
+```{r}
+# devtools::load_all("~/bench/seurat/")
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+library(Signac)
+```
+
+```{r}
+seurat_bench_integ <- function(rna, atac, mt, cnt_ref, mt_ref, cnt_q, mt_q) {
+  
+  so <- CreateSeuratObject(
+    rna,
+    project = "IntegTest",
+    assay = "RNA",
+    names.field = 1,
+    names.delim = "_",
+    meta.data = mt
+  )
+  
+  so[["ATAC"]] <- CreateAssayObject(counts = atac)
+  
+  so_q <- CreateSeuratObject(
+    cnt_q,
+    project = "IntegTest",
+    assay = "ATAC",
+    names.field = 1,
+    names.delim = "_",
+    meta.data = mt_q
+  )
+  
+  DefaultAssay(so) <- "RNA"
+  so <- SCTransform(so, verbose = FALSE) 
+  
+  # normalize multiome ATAC
+  DefaultAssay(so) <- "ATAC"
+  so <- RunTFIDF(so)
+  so <- FindTopFeatures(so, min.cutoff = "q0")
+  
+  # normalize query
+  so_q<- RunTFIDF(so_q)
+  
+  so_ref <- CreateSeuratObject(
+    cnt_ref,
+    project = "IntegTest",
+    assay = "RNA",
+    names.field = 1,
+    names.delim = "_",
+    meta.data = mt_ref
+  )
+  
+  so_ref = SCTransform(object = so_ref) %>% RunPCA() %>% RunUMAP(dims = 1:50, return.model = TRUE) 
+  
+  DefaultAssay(so) <-  "RNA"
+  DefaultAssay(so_ref) <- "RNA"
+  
+  so.ext <- PrepareBridgeReference(reference = so_ref,
+                                   bridge = so, 
+                                   reference.reduction = "pca",
+                                   reference.dims = 1:50,
+                                   normalization.method = "LogNormalize"
+  )
+  
+  bridge.anchor <- FindBridgeTransferAnchors(extended.reference = so.ext, 
+                                             query = so_q,
+                                             reduction = "lsiproject",
+                                             dims = 2:50
+  )
+  
+  so_q <- MapQuery(anchorset = bridge.anchor, 
+                   reference = so_ref, 
+                   query = so_q, 
+                   refdata = list(
+                     l1 = "pop"),
+                   reduction.model = "umap" 
+  )
+  
+  lst(query = so_q, ref = so_ref, ext = so.ext, so = so)
+}
+```
+
+```{r}
+(\(){
+  counter <- 0
+  
+  for (conf in config_all) {
+    if (!res_exist(conf)) next
+    
+    ds_path <- .conf_path(conf, "res.rds")
+    counter <- counter + 1
+    cat(sprintf("[%2d] %s\n", counter, ds_path))
+    cat("1", file = .conf_path(conf, "have_seurat"), append = T)
+    
+    res <- readRDS(.conf_path(conf, "integ/integ.rds"))
+    # divide_batches(res, nbatch = 3)
+
+    cnt <- t(res$counts_obs)
+    atac_cnt <- t(res$atac_obs)
+    mt <- res$meta
+    stopifnot(length(unique(mt$batch)) == 3)
+  
+    rownames(cnt) <- paste0("gene", 1:nrow(cnt))
+    rownames(atac_cnt) <- paste0("region", 1:nrow(atac_cnt))
+    colnames(cnt) <- colnames(atac_cnt) <- rownames(mt) <- paste0("cell", 1:ncol(cnt), "_type", mt$pop)
+    
+    b1 <- mt$batch == 1; b2 <- mt$batch == 2; b3 <- mt$batch == 3
+    cnt_b1 <- cnt[, b1]; cnt_b2 <- cnt[, b2]; cnt_b3 <- cnt[, b3]
+    atac_b1 <- atac_cnt[, b1]; atac_b2 <- atac_cnt[, b2]; atac_b3 <- atac_cnt[, b3]
+    mt_b1 <- mt[b1, ]; mt_b2 <- mt[b2, ]; mt_b3 <- mt[b3, ]
+    
+    so <- seurat_bench_integ(cnt_b1, atac_b1, mt_b1, cnt_b3, mt_b3, atac_b2, mt_b2)
+    
+    out_dir <- .conf_path(conf, "integ")
+    res_dir <- file.path(out_dir, "out_seurat")
+    dir.create(res_dir, recursive = T)
+    write.csv(so$query@meta.data, file.path(res_dir, "q_meta.csv"),  row.names = F, quote = F)
+    write.csv(so$ext@reference@meta.data, file.path(res_dir, "ref_meta.csv"),  row.names = F, quote = F)
+    write.csv(so$query@assays[["ATAC"]]@counts, file.path(res_dir, "counts.csv"),  row.names = F, quote = F)
+    write.csv(so$query@reductions[["ref.umap"]]@cell.embeddings, file.path(res_dir, "q_umap.csv"),  row.names = F, quote = F)
+    write.csv(so$ref@reductions[["umap"]]@cell.embeddings, file.path(res_dir, "ref_umap.csv"),  row.names = F, quote = F)
+    
+    ref_cnts <- so$ext@reference@assays[["Bridge"]]@data
+    q_cnts <- so$query@reductions[["ref.Bridge.reduc"]]@cell.embeddings %>% t()
+    
+    write.csv(q_cnts, file.path(res_dir, "q_embed.csv"),  row.names = F, quote = F)
+    write.csv(ref_cnts, file.path(res_dir, "ref_embed.csv"),  row.names = F, quote = F)
+  }
+})()
+```

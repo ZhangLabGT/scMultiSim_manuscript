@@ -1,0 +1,606 @@
+```{r}
+library(Giotto)
+library(GiottoData)
+python_path = NULL
+installGiottoEnvironment()
+
+my_working_dir = '~/scMultiSim/bench/unif/real/'
+getSpatialDataset(dataset = 'seqfish_SS_cortex', directory = my_working_dir, method = 'wget')
+```
+
+
+```{r}
+instrs = createGiottoInstructions(save_plot = FALSE,
+                                  show_plot = TRUE,
+                                  save_dir = my_working_dir,
+                                  python_path = python_path)
+
+# create giotto object from provided paths ####
+expr_path = paste0(my_working_dir, "cortex_svz_expression.txt")
+loc_path = paste0(my_working_dir, "cortex_svz_centroids_coord.txt")
+meta_path = paste0(my_working_dir, "cortex_svz_centroids_annot.txt")
+#This dataset contains multiple field of views which need to be stitched together
+# first merge location and additional metadata
+SS_locations = data.table::fread(loc_path)
+cortex_fields = data.table::fread(meta_path)
+SS_loc_annot = data.table::merge.data.table(SS_locations, cortex_fields, by = 'ID')
+SS_loc_annot[, ID := factor(ID, levels = paste0('cell_',1:913))]
+data.table::setorder(SS_loc_annot, ID)
+# create file with offset information
+my_offset_file = data.table::data.table(field = c(0, 1, 2, 3, 4, 5, 6),
+                                        x_offset = c(0, 1654.97, 1750.75, 1674.35, 675.5, 2048, 675),
+                                        y_offset = c(0, 0, 0, 0, -1438.02, -1438.02, 0))
+# create a stitch file
+stitch_file = stitchFieldCoordinates(location_file = SS_loc_annot,
+                                     offset_file = my_offset_file,
+                                     cumulate_offset_x = T,
+                                     cumulate_offset_y = F,
+                                     field_col = 'FOV',
+                                     reverse_final_x = F,
+                                     reverse_final_y = T)
+stitch_file = stitch_file[,.(ID, X_final, Y_final)]
+stitch_file$ID <- as.character(stitch_file$ID)
+my_offset_file = my_offset_file[,.(field, x_offset_final, y_offset_final)]
+```
+
+```{r}
+# create Giotto object
+SS_seqfish <- createGiottoObject(expression = expr_path,
+                                 spatial_locs = stitch_file,
+                                 offset_file = my_offset_file,
+                                 instructions = instrs)
+# add additional annotation if wanted
+SS_seqfish = addCellMetadata(SS_seqfish,
+                             new_metadata = cortex_fields,
+                             by_column = T,
+                             column_cell_ID = 'ID')
+# subset data to the cortex field of views
+cell_metadata = pDataDT(SS_seqfish)
+cortex_cell_ids = cell_metadata[FOV %in% 0:4]$cell_ID
+SS_seqfish = subsetGiotto(SS_seqfish, cell_ids = cortex_cell_ids)
+# filter
+SS_seqfish <- filterGiotto(gobject = SS_seqfish,
+                           expression_threshold = 1,
+                           feat_det_in_min_cells = 10,
+                           min_det_feats_per_cell = 10,
+                           expression_values = c('raw'),
+                           verbose = T)
+# normalize
+SS_seqfish <- normalizeGiotto(gobject = SS_seqfish, scalefactor = 6000, verbose = T)
+# add gene & cell statistics
+SS_seqfish <- addStatistics(gobject = SS_seqfish)
+# adjust expression matrix for technical or known variables
+SS_seqfish <- adjustGiottoMatrix(gobject = SS_seqfish, expression_values = c('normalized'),
+                                 covariate_columns = c('nr_feats', 'total_expr'),
+                                 return_gobject = TRUE,
+                                 update_slot = c('custom'))
+# visualize
+spatPlot(gobject = SS_seqfish)
+```
+```{r}
+## highly variable features (HVF)
+SS_seqfish <- calculateHVF(gobject = SS_seqfish)
+## select genes based on highly variable features and gene statistics, both found in feature (gene) metadata
+gene_metadata = fDataDT(SS_seqfish)
+featgenes = gene_metadata[hvf == 'yes' & perc_cells > 4 & mean_expr_det > 0.5]$gene_ID
+## run PCA on expression values (default)
+SS_seqfish <- runPCA(gobject = SS_seqfish, genes_to_use = featgenes, scale_unit = F, center = F)
+screePlot(SS_seqfish)
+# plotPCA(gobject = SS_seqfish)
+SS_seqfish <- runUMAP(SS_seqfish, dimensions_to_use = 1:15, n_threads = 10)
+# plotUMAP(gobject = SS_seqfish)
+SS_seqfish <- runtSNE(SS_seqfish, dimensions_to_use = 1:15)
+plotTSNE(gobject = SS_seqfish)
+## sNN network (default)
+SS_seqfish <- createNearestNetwork(gobject = SS_seqfish,
+                                   dimensions_to_use = 1:15,
+                                   k = 15)
+## Leiden clustering
+SS_seqfish <- doLeidenCluster(gobject = SS_seqfish,
+                              resolution = 0.4,
+                              n_iterations = 1000)
+plotUMAP(gobject = SS_seqfish,
+         cell_color = 'leiden_clus',
+         show_NN_network = T,
+         point_size = 2.5)
+
+## Leiden subclustering for specified clusters
+SS_seqfish = doLeidenSubCluster(gobject = SS_seqfish,
+                                cluster_column = 'leiden_clus',
+                                resolution = 0.2, k_neighbors = 10,
+                                pca_param = list(expression_values = 'normalized', scale_unit = F),
+                                nn_param = list(dimensions_to_use = 1:5),
+                                selected_clusters = c(5, 6, 7),
+                                name = 'sub_leiden_clus_select')
+## set colors for clusters
+subleiden_order = c( 1.1, 2.1, 3.1, 4.1, 5.1, 5.2,
+                     6.1, 6.2, 7.1,  7.2, 8.1, 9.1)
+subleiden_colors = Giotto:::getDistinctColors(length(subleiden_order))
+names(subleiden_colors) = subleiden_order
+plotUMAP(gobject = SS_seqfish,
+         cell_color = 'sub_leiden_clus_select', cell_color_code = subleiden_colors,
+         show_NN_network = T, point_size = 2.5, show_center_label = F,
+         legend_text = 12, legend_symbol_size = 3)
+
+## show cluster relationships
+showClusterHeatmap(gobject = SS_seqfish, cluster_column = 'sub_leiden_clus_select',
+                   row_names_gp = grid::gpar(fontsize = 9), column_names_gp = grid::gpar(fontsize = 9))
+```
+
+```{r}
+## gini
+gini_markers_subclusters = findMarkers_one_vs_all(gobject = SS_seqfish,
+                                                  method = 'gini',
+                                                  expression_values = 'normalized',
+                                                  cluster_column = 'sub_leiden_clus_select',
+                                                  min_feats = 20,
+                                                  min_expr_gini_score = 0.5,
+                                                  min_det_gini_score = 0.5)
+topgenes_gini = gini_markers_subclusters[, head(.SD, 2), by = 'cluster']
+## violin plot
+violinPlot(SS_seqfish, feats = unique(topgenes_gini$feats), cluster_column = 'sub_leiden_clus_select',
+           strip_text = 8, strip_position = 'right', cluster_custom_order = unique(topgenes_gini$cluster))
+# cluster heatmap
+topgenes_gini2 = gini_markers_subclusters[, head(.SD, 6), by = 'cluster']
+plotMetaDataHeatmap(SS_seqfish, selected_feats = unique(topgenes_gini2$feats),
+                    custom_feat_order = unique(topgenes_gini2$feats),
+                    custom_cluster_order = unique(topgenes_gini2$cluster),
+                    metadata_cols = c('sub_leiden_clus_select'), x_text_size = 10, y_text_size = 10)
+## general cell types
+## create vector with names
+clusters_cell_types_cortex = c('L6 eNeuron', 'L4 eNeuron', 'L2/3 eNeuron', 'L5 eNeuron',
+                               'Lhx6 iNeuron', 'Adarb2 iNeuron',
+                               'endothelial', 'mural',
+                               'OPC','Olig',
+                               'astrocytes', 'microglia')
+names(clusters_cell_types_cortex) = c(1.1, 2.1, 3.1, 4.1,
+                                      5.1, 5.2,
+                                      6.1, 6.2,
+                                      7.1, 7.2,
+                                      8.1, 9.1)
+SS_seqfish = annotateGiotto(gobject = SS_seqfish, annotation_vector = clusters_cell_types_cortex,
+                            cluster_column = 'sub_leiden_clus_select', name = 'cell_types')
+# cell type order and colors
+cell_type_order = c('L6 eNeuron', 'L5 eNeuron', 'L4 eNeuron', 'L2/3 eNeuron',
+                    'astrocytes', 'Olig', 'OPC','Adarb2 iNeuron', 'Lhx6 iNeuron',
+                    'endothelial', 'mural', 'microglia')
+cell_type_colors = subleiden_colors
+names(cell_type_colors) = clusters_cell_types_cortex[names(subleiden_colors)]
+cell_type_colors = cell_type_colors[cell_type_order]
+## violin plot
+violinPlot(gobject = SS_seqfish, feats = unique(topgenes_gini$feats),
+           strip_text = 7, strip_position = 'right',
+           cluster_custom_order = cell_type_order,
+           cluster_column = 'cell_types', color_violin = 'cluster')
+## heatmap genes vs cells
+gini_markers_subclusters[, cell_types := clusters_cell_types_cortex[cluster] ]
+gini_markers_subclusters[, cell_types := factor(cell_types, cell_type_order)]
+data.table::setorder(gini_markers_subclusters, cell_types)
+plotHeatmap(gobject = SS_seqfish,
+            feats = gini_markers_subclusters[, head(.SD, 3), by = 'cell_types']$feats,
+            feat_order = 'custom',
+            feat_custom_order = unique(gini_markers_subclusters[, head(.SD, 3), by = 'cluster']$feats),
+            cluster_column = 'cell_types', cluster_order = 'custom',
+            cluster_custom_order = unique(gini_markers_subclusters[, head(.SD, 3), by = 'cell_types']$cell_types),
+            legend_nrows = 2)
+```
+
+```{r}
+SS_seqfish <- createSpatialGrid(gobject = SS_seqfish,
+                                sdimx_stepsize = 500,
+                                sdimy_stepsize = 500,
+                                minimum_padding = 50)
+spatPlot(gobject = SS_seqfish, show_grid = T, point_size = 1.5)
+## delaunay network: stats + creation
+plotStatDelaunayNetwork(gobject = SS_seqfish, maximum_distance = 400, save_plot = F)
+SS_seqfish = createSpatialNetwork(gobject = SS_seqfish, minimum_k = 2, maximum_distance_delaunay = 400)
+## create spatial networks based on k and/or distance from centroid
+SS_seqfish <- createSpatialNetwork(gobject = SS_seqfish, method = 'kNN', k = 5, name = 'spatial_network')
+SS_seqfish <- createSpatialNetwork(gobject = SS_seqfish, method = 'kNN', k = 10, name = 'large_network')
+SS_seqfish <- createSpatialNetwork(gobject = SS_seqfish, method = 'kNN', k = 100,
+                                   maximum_distance_knn = 200, minimum_k = 2, name = 'distance_network')
+## visualize different spatial networks on first field (~ layer 1)
+cell_metadata = pDataDT(SS_seqfish)
+field1_ids = cell_metadata[FOV == 0]$cell_ID
+subSS_seqfish = subsetGiotto(SS_seqfish, cell_ids = field1_ids)
+spatPlot(gobject = subSS_seqfish, show_network = T,
+         network_color = 'blue', spatial_network_name = 'Delaunay_network',
+         point_size = 2.5, cell_color = 'cell_types')
+## 3 new methods to identify spatial genes
+km_spatialfeats = binSpect(SS_seqfish)
+spatGenePlot(SS_seqfish, expression_values = 'scaled', genes = km_spatialfeats[1:4]$feats,
+             point_shape = 'border', point_border_stroke = 0.1,
+             show_network = F, network_color = 'lightgrey', point_size = 2.5,
+             cow_n_col = 2)
+## spatial co-expression patterns ##
+ext_spatial_genes = km_spatialfeats[1:500]$feats
+## 1. calculate gene spatial correlation and single-cell correlation
+## create spatial correlation object
+spat_cor_netw_DT = detectSpatialCorFeats(SS_seqfish,
+                                         method = 'network',
+                                         spatial_network_name = 'Delaunay_network',
+                                         subset_feats = ext_spatial_genes)
+## 2. cluster correlated genes & visualize
+spat_cor_netw_DT = clusterSpatialCorFeats(spat_cor_netw_DT,
+                                          name = 'spat_netw_clus',
+                                          k = 8)
+heatmSpatialCorFeats(SS_seqfish, spatCorObject = spat_cor_netw_DT, use_clus_name = 'spat_netw_clus',
+                     heatmap_legend_param = list(title = NULL))
+# 3. rank spatial correlated clusters and show genes for selected clusters
+netw_ranks = rankSpatialCorGroups(SS_seqfish,
+                                  spatCorObject = spat_cor_netw_DT,
+                                  use_clus_name = 'spat_netw_clus')
+top_netw_spat_cluster = showSpatialCorFeats(spat_cor_netw_DT,
+                                            use_clus_name = 'spat_netw_clus',
+                                            selected_clusters = 6,
+                                            show_top_feats = 1)
+# 4. create metagene enrichment score for clusters
+cluster_genes_DT = showSpatialCorFeats(spat_cor_netw_DT,
+                                       use_clus_name = 'spat_netw_clus',
+                                       show_top_feats = 1)
+cluster_genes = cluster_genes_DT$clus; names(cluster_genes) = cluster_genes_DT$feat_ID
+SS_seqfish = createMetafeats(SS_seqfish,
+                             feat_clusters = cluster_genes,
+                             name = 'cluster_metagene')
+spatCellPlot(SS_seqfish,
+             spat_enr_names = 'cluster_metagene',
+             cell_annotation_values = netw_ranks$clusters,
+             point_size = 1.5, cow_n_col = 3)
+hmrf_folder = paste0(my_working_dir,'/','11_HMRF/')
+if(!file.exists(hmrf_folder)) dir.create(hmrf_folder, recursive = T)
+my_spatial_genes = km_spatialfeats[1:100]$feats
+# do HMRF with different betas
+HMRF_spatial_genes = doHMRF(gobject = SS_seqfish,
+                            expression_values = 'scaled',
+                            spatial_genes = my_spatial_genes,
+                            spatial_network_name = 'Delaunay_network',
+                            k = 9,
+                            betas = c(28,2,3),
+                            output_folder = paste0(hmrf_folder, '/', 'Spatial_genes/SG_top100_k9_scaled'))
+## view results of HMRF
+for(i in seq(28, 32, by = 2)) {
+  viewHMRFresults2D(gobject = SS_seqfish,
+                    HMRFoutput = HMRF_spatial_genes,
+                    k = 9, betas_to_view = i,
+                    point_size = 2)
+}
+## add HMRF of interest to giotto object
+SS_seqfish = addHMRF(gobject = SS_seqfish,
+                     HMRFoutput = HMRF_spatial_genes,
+                     k = 9, betas_to_add = c(28),
+                     hmrf_name = 'HMRF_2')
+## visualize
+spatPlot(gobject = SS_seqfish,
+         cell_color = 'HMRF_2_k9_b.28',
+         point_size = 3,
+         coord_fix_ratio = 1)
+cell_proximities = cellProximityEnrichment(gobject = SS_seqfish,
+                                           cluster_column = 'cell_types',
+                                           spatial_network_name = 'Delaunay_network',
+                                           adjust_method = 'fdr',
+                                           number_of_simulations = 2000)
+## barplot
+cellProximityBarplot(gobject = SS_seqfish,
+                     CPscore = cell_proximities,
+                     min_orig_ints = 5, min_sim_ints = 5)
+
+```
+
+```{r, results='hide', message=FALSE}
+## LR expression
+## LR activity changes
+LR_data = data.table::fread(system.file("extdata", "mouse_ligand_receptors.txt", package = 'Giotto'))
+LR_data[, ligand_det := ifelse(LR_data$mouseLigand %in% SS_seqfish@feat_ID$rna, T, F)]
+LR_data[, receptor_det := ifelse(LR_data$mouseReceptor %in% SS_seqfish@feat_ID$rna, T, F)]
+LR_data_det = LR_data[ligand_det == T & receptor_det == T]
+select_ligands = LR_data_det$mouseLigand
+select_receptors = LR_data_det$mouseReceptor
+## get statistical significance of gene pair expression changes based on expression
+expr_only_scores = exprCellCellcom(gobject = SS_seqfish,
+                                   cluster_column = 'cell_types',
+                                   random_iter = 1000,
+                                   feat_set_1 = select_ligands,
+                                   feat_set_2 = select_receptors,
+                                   verbose = FALSE)
+## get statistical significance of gene pair expression changes upon cell-cell interaction
+spatial_all_scores = spatCellCellcom(SS_seqfish,
+                                     spatial_network_name = 'spatial_network',
+                                     cluster_column = 'cell_types',
+                                     random_iter = 1000,
+                                     feat_set_1 = select_ligands,
+                                     feat_set_2 = select_receptors,
+                                     adjust_method = 'fdr',
+                                     do_parallel = T,
+                                     cores = 8,
+                                     verbose = 'none')
+## select top LR ##
+selected_spat = spatial_all_scores[p.adj <= 0.01 & abs(log2fc) > 0.25 & lig_nr >= 4 & rec_nr >= 4]
+data.table::setorder(selected_spat, -PI)
+# ====
+top_LR_ints = unique(selected_spat[order(-abs(PI))]$LR_comb)[1:33]
+top_LR_cell_ints = unique(selected_spat[order(-abs(PI))]$LR_cell_comb)[1:33]
+plotCCcomDotplot(gobject = SS_seqfish,
+                 comScores = spatial_all_scores,
+                 selected_LR = top_LR_ints,
+                 selected_cell_LR = top_LR_cell_ints,
+                 cluster_on = 'PI')
+```
+
+## Output the count matrix
+
+```{r}
+mtx <- as.matrix(SS_seqfish@expression$cell$rna$custom@exprMat)
+hvf <- gene_metadata$hvf == 'yes' & gene_metadata$perc_cells > 4 & gene_metadata$mean_expr_det > 0.5
+# dir.create("/home/lhc/bench/Beeline/inputs/seqfish/0/", recursive = T)
+# write.csv(mtx[hvf,], "/home/lhc/bench/Beeline/inputs/seqfish/0/ExpressionData.csv", quote = F)
+```
+
+## Get inferred GRN
+
+```{r}
+set.seed(1)
+sc_grn <- read.delim("/home/lhc/bench/Beeline/outputs/seqfish/0/GENIE3/outFile.txt", header = T)[1:200,]
+
+sc_grn_genes <- unique(c(sc_grn$TF, sc_grn$target))
+
+.remove <- numeric()
+for (i in 1:nrow(sc_grn)) {
+  if ((sc_grn[i, 1] %in% sc_grn[1:i, 2]) && (sc_grn[i, 2] %in% sc_grn[1:i, 1])) {
+    .remove <- c(.remove, i)
+  }
+}
+sc_grn <- sc_grn[-.remove, ]
+
+in_grn <- rownames(mtx) %in% sc_grn_genes
+table(in_grn)
+
+other_g <- sample(which(!in_grn), 200 - sum(in_grn))
+sce <- as.matrix(SS_seqfish@expression$cell$rna$raw@exprMat)
+sce <- sce[sort(c(which(in_grn), other_g)),]
+
+sc_grn$importance <- sc_grn$importance * 100
+```
+
+## dygen
+
+```{r}
+library(tidyverse)
+library(dyngen)
+library(tibble)
+```
+
+```{r}
+set.seed(1)
+sc_grn_1 <- sc_grn
+
+.dyn_module_info <-
+rbind(
+  data.frame(
+  module_id = c("Burn1", "Burn2"),
+  basal = 1,
+  burn = T, #sc_grn_genes %in% sc_grn$TF,
+  independence = 1
+),
+  data.frame(
+  module_id = unique(c(sc_grn_1$TF, sc_grn_1$target)),
+  basal = 1,
+  burn = F, #sc_grn_genes %in% sc_grn$TF,
+  independence = 1
+)
+)
+
+.dyn_network <-
+ rbind(
+  data.frame(
+  from = "Burn1",
+  to = "Burn2",
+  effect = as.integer(1),
+  strength = 1,
+  hill = 2
+),
+  data.frame(
+  from = "Burn2",
+  to = unique(setdiff(sc_grn_1$TF, sc_grn_1$target)),
+  effect = as.integer(1),
+  strength = 1,
+  hill = 2
+),
+  data.frame(
+  from = sc_grn_1$TF,
+  to = sc_grn_1$target,
+  effect = as.integer(1),
+  strength = sc_grn_1$importance,
+  hill = 2
+)
+)
+
+backbone <- backbone(
+  module_info = as_tibble(.dyn_module_info),
+  module_network = as_tibble(.dyn_network),
+  expression_patterns = tribble(
+    ~from, ~to,  ~module_progression, ~start, ~burn, ~time,
+    "s0",  "s1", "+Burn1,+Burn2",               TRUE,   TRUE,  30,
+    "s1",  "s2", "+Slc7a5",               FALSE,   FALSE,  300,
+  )
+)
+
+.dyn_config <- 
+  initialise_model(
+    backbone = backbone,
+    num_tfs = nrow(backbone$module_info),
+    num_cells = 523,
+    num_targets = 110,
+    num_hks = 10,
+    verbose = FALSE,
+    tf_network_params = tf_network_default(
+      min_tfs_per_module = 1L,
+      sample_num_regulators = function() 1,
+      weighted_sampling = FALSE
+    ),
+    feature_network_params = feature_network_default(
+      realnet = NULL,
+      damping = 0.01,
+      target_resampling = Inf,
+      max_in_degree = 5
+    ),
+    simulation_params = simulation_default(
+      total_time = 1000,
+      census_interval = 2, 
+      ssa_algorithm = ssa_etl(tau = 300/3600),
+      experiment_params = simulation_type_wild_type(num_simulations = 10)
+    ),
+    experiment_params = experiment_snapshot(
+      realcount = Matrix(data = sce, sparse = T)
+    )
+  )
+
+.dyn_model <- generate_tf_network(.dyn_config)
+plot_feature_network(.dyn_model, show_targets = FALSE)
+
+dg_out <- generate_dataset(
+  .dyn_config,
+  format = "sce",
+  make_plots = FALSE
+)
+```
+
+## scMultiSim
+
+```{r}
+lrpair_used <- selected_spat[lig_nr > 10 & rec_nr > 10 & lig_expr > 0 & rec_expr > 0]
+lrpair_used <- lrpair_used[log2fc > 0.7 | log2fc < -1]
+```
+
+```{r}
+tree10 <- ape::read.tree(text = '(A:1.0,B:1.0,C:1.0,D:1.0:,E:1.0,F:1.0,G:1.0,H:1.0,I:1.0,J:1.0);')
+
+sc_grn_scm <- sc_grn[,c(2, 1, 3)]
+
+cell_types_pop <- table(SS_seqfish@cell_metadata$cell$rna$cell_types)
+cell_types <- setNames(seq_along(cell_types_pop), names(cell_types_pop))
+n_lr_pair <- nrow(lrpair_used)
+ctp <- cci_cell_type_params(tree10, total.lr = n_lr_pair, step.size = 1, rand = F, discrete = T)
+for (k in seq(n_lr_pair)) {
+  i <- cell_types[unlist(lrpair_used[k, 'lig_cell_type'])]
+  j <- cell_types[unlist(lrpair_used[k, 'rec_cell_type'])]
+  print(c(i, j, k))
+  ctp$params[i, j, k] <- ctp$params[j, i, k] <- 1
+}
+
+lig_params <- data.frame(
+  receptor = lrpair_used$receptor,
+  ligand = lrpair_used$ligand,
+  effect = lrpair_used$log2fc * 2
+)
+
+```
+
+```{r}
+res <- sim_true_counts(list2(
+  rand.seed = 1,
+  threads = 1,
+  GRN = sc_grn_scm,
+  cif.sigma = 3,
+  diff.cif.fraction = 0.8,
+  num.genes = 200,
+  num.cells = 523,
+  num.cifs = 50,
+  tree = tree10,
+  discrete.cif = T,
+  discrete.pop.size = cell_types_pop,
+  do.velocity = F,
+  intrinsic.noise = 1,
+  giv.sd = 0.03,
+  hge.prop = 0.05,
+  hge.mean = 1.6,
+  hge.sd = 0.5,
+  hge.max.var = 80,
+  scale.s = 0.8,
+  cci = list(
+    params = lig_params,
+    cell.type.interaction = ctp,
+    max.neighbors = 4,
+    cell.type.interaction = "random",
+    step.size = 1
+  ),
+  debug = T,
+))
+```
+
+# Plot
+
+```{r}
+compare_real_dist <- \(c1, c2, c3){
+  
+  lib.size <- \(ct) apply(ct, 2, function(pc) sum(pc))
+  zero.cnt <- \(ct) apply(ct, 2, function(pc) sum(pc == 0) / length(pc))
+  
+  xorder <- c("true", "scMtSim", "dyngen")
+  df <- rbind(
+    data.frame(x = lib.size(c1), group = "true"),
+    data.frame(x = lib.size(c2), group = "scMtSim"),
+    data.frame(x = lib.size(c3), group = "dyngen")
+  )
+  df$group <- factor(df$group, levels = xorder)
+  boxplot(df$x ~ df$group, ylab="", xlab="")
+  title("Lib size (per cell)")
+  
+  df <- rbind(
+    data.frame(x = zero.cnt(c1), group = "true"),
+    data.frame(x = zero.cnt(c2), group = "scMtSim"),
+    data.frame(x = zero.cnt(c3), group = "dyngen")
+  )
+  df$group <- factor(df$group, levels = xorder)
+  boxplot(df$x ~ df$group, ylim = c(0, 1), ylab="", xlab="")
+  title("Zero count (per cell)")
+  
+  zero.cnt.G <- \(ct) apply(ct, 1, function(pc) sum(pc == 0) / length(pc))
+  mean.cnt.G <- \(ct) apply(ct, 1, function(pc) mean(pc))
+  var.cnt.G <- \(ct) apply(ct, 1, function(pc) var(pc))
+  
+  df <- rbind(
+    data.frame(x = zero.cnt.G(c1), group = "true"),
+    data.frame(x = zero.cnt.G(c2), group = "scMtSim"),
+    data.frame(x = zero.cnt.G(c3), group = "dyngen")
+  )
+  df$group <- factor(df$group, levels = xorder)
+  boxplot(df$x ~ df$group, ylim = c(0, 1), ylab="", xlab="")
+  title("Zero count (per gene)")
+  
+  df <- rbind(
+    data.frame(x = mean.cnt.G(c1), group = "true"),
+    data.frame(x = mean.cnt.G(c2), group = "scMtSim"),
+    data.frame(x = mean.cnt.G(c3), group = "dyngen")
+  )
+  df$group <- factor(df$group, levels = xorder)
+  boxplot(df$x ~ df$group, ylab="", xlab="")
+  title("Mean count (per gene)")
+  
+  df <- rbind(
+    data.frame(x = var.cnt.G(c1), group = "true"),
+    data.frame(x = var.cnt.G(c2), group = "scMtSim"),
+    data.frame(x = var.cnt.G(c3), group = "dyngen")
+  )
+  df$group <- factor(df$group, levels = xorder)
+  boxplot(df$x ~ df$group, ylab="", xlab="")
+  title("Var count (per gene)")
+  
+  df1 <- rbind(
+    data.frame(y = zero.cnt.G(c1), x = mean.cnt.G(c1), group = "true"),
+    data.frame(y = zero.cnt.G(c2), x = mean.cnt.G(c2), group = "scMtSim"),
+    data.frame(y = zero.cnt.G(c3), x = mean.cnt.G(c3), group = "dyngen")
+  )
+  df1$group <- factor(df1$group, levels = xorder)
+  p <- ggplot(df1, aes(x, y, colour = group)) + geom_point()
+  print(p)
+}
+```
+
+```{r}
+add_expr_noise(res, protocol = "UMI",
+               alpha_mean = 0.15, alpha_sd = 0.2,
+               alpha_gene_mean = 0.1, alpha_gene_sd = 0,
+               depth_mean = 40000)
+
+compare_real_dist(sce, res$counts_obs$counts, counts(dg_out$dataset))
+```

@@ -1,0 +1,46 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../utils.R")
+```
+
+(b) Gene corr. heatmap
+
+```{r}
+res <- read_res(configs3[[3]])
+plot_gene_module_cor_heatmap(res)
+```
+
+(c) Regulator-Target corr.
+
+```{r}
+# res <- read_res(configs3[[3]])
+(\(){
+  cells <- res$cell_meta$pop == "4_5" | res$cell_meta$pop == "5_2"
+  rg <- res$counts[19 ,cells] %>% log2()
+  tg <- res$counts[20 ,cells] %>% log2()
+  region <- which(res$region_to_gene[,19] > 0)
+  atac <- res$atacseq_data[region, cells] %>% `+`(1) %>% log2() %>% colMeans()
+  x <- seq_along(rg)
+  
+  # range <- 87:125  # zoomed in
+  range <- seq_along(x)
+  
+  plot(x[range], rg[range], type="b", pch = 10, col = "red", ylim = c(2, 8))
+  lines(x[range], tg[range], type="b", pch = 10, col = "blue")
+  plot(x, rg, type="b", pch = 10, col = "red", ylim = c(0, 10))
+  lines(x, tg, type="b", pch = 10, col = "blue")
+  lines(x, atac, type="b", pch = 10, col = "green")
+  print(cor(rg, tg))
+})()
+```
+
+(d) (e) Spatial location & corr.
+
+```{r}
+plot_cell_loc(res)
+
+gene_corr_cci(res)
+```

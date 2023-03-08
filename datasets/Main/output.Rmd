@@ -1,0 +1,239 @@
+# Output data for benchmarking
+
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+```
+
+
+```{r}
+library(slingshot, quietly = T)
+library(uwot, quietly = T)
+library(mclust, quietly = T)
+
+configs1 <- expand.grid(
+  tree = c(1),
+  ngenes = c(110, 200, 500),
+  ncells = c(500, 800),
+  sigma = c(0.1, 0.5),
+  seed = 1:4
+) %>% split(., seq(nrow(.)))
+configs3 <- expand.grid(
+  tree = c(3),
+  ngenes = c(110, 200, 500),
+  ncells = c(500, 800),
+  sigma = c(0.1, 0.5),
+  seed = 1:4
+) %>% split(., seq(nrow(.)))
+configs5 <- expand.grid(
+  tree = c(5),
+  ngenes = c(110, 200, 500),
+  ncells = c(500, 800),
+  sigma = c(0.1, 0.5),
+  seed = 1:4
+) %>% split(., seq(nrow(.)))
+configs_all <- c(configs1, configs3, configs5)
+```
+
+## Utility methods
+
+```{r}
+.conf_path <- function(conf, fn = NULL, grn = F) {
+  ROOT_DIR <- "/home/[USER]/scMultiSim/bench/unif/0"
+  GRN_DIR <- "/home/[USER]/scMultiSim/bench/unif"
+  fd <- sprintf("tree%g_%g_cells%g_genes_sigma%g_%g",
+                conf$tree, conf$ncells, conf$ngenes, conf$sigma, conf$seed)
+  fd <- if (grn) {
+    file.path(GRN_DIR, "grn_all", fd)
+  } else {
+    file.path(ROOT_DIR, fd)
+  }
+  if (is.null(fn)) {
+    return(fd)
+  } else {
+    return(file.path(fd, fn))
+  }
+}
+
+read_res <- function(conf) {
+  readRDS(.conf_path(conf, "res.rds"))
+}
+
+res_exist <- function(conf) {
+  file.exists(.conf_path(conf, "res.rds")) 
+}
+
+grn_exist <- function(conf) {
+  file.exists(.conf_path(conf, "have_grn")) 
+}
+
+cci_exist <- function(conf) {
+  file.exists(.conf_path(conf, "have_cci")) 
+}
+
+uinmf_exist <- function(conf) file.exists(.conf_path(conf, "have_uinmf"))
+seurat_exist <- function(conf) file.exists(.conf_path(conf, "have_seurat"))
+```
+
+## Methods to output data for benchmarking
+
+```{r}
+output_cci_res <- function(conf) {
+  root <- .conf_path(conf, "cci")
+  cat(sprintf("%s\n", root))
+  res <- read_res(conf)
+  dir.create(root, showWarnings = F)
+  cat("1", file = .conf_path(conf, "have_cci"), append = T)
+  write.csv(res$counts, file = file.path(root, "counts.csv"), quote = F)
+  write.csv(res$cell_meta, file = file.path(root, "cell_info.csv"), quote = F)
+  write.csv(res$grn_params, file = file.path(root, "grn.csv"), row.names = F, quote = F)
+  write.csv(res$cci_cell_type_param, file = file.path(root, "cci.csv"), row.names = F, quote = F)
+  write.csv(res$cci_locs, file = file.path(root, "locs.csv"), row.names = T, quote = F)
+}
+
+
+output_grn_res <- function(conf, noise = F) {
+  root <- .conf_path(conf, grn = T)
+  cat(sprintf("%s\n", root))
+  res <- read_res(conf)
+  dir.create(root, showWarnings = F, recursive = T)
+  cat("1", file = .conf_path(conf, "have_grn"), append = T)
+  
+  counts <- if (noise) {
+    log2(res$counts_obs + 1)
+  } else {
+    log2(res$counts + 1)
+  }
+  
+  rownames(counts) <- paste0("gene", 1:res$.n$gene)
+  colnames(counts) <- paste0("cell", 1:res$.n$cell)
+  write.csv(counts, file = file.path(root, "ExpressionData.csv"), quote = F)
+  
+  sce <- SingleCellExperiment(assays = List(counts = counts))
+  FQnorm <- function(counts){
+    rk <- apply(counts,2,rank,ties.method='min')
+    counts.sort <- apply(counts,2,sort)
+    refdist <- apply(counts.sort,1,median)
+    norm <- apply(rk,2,function(r){ refdist[r] })
+    rownames(norm) <- rownames(counts)
+    return(norm)
+  }
+  assays(sce)$norm <- FQnorm(assays(sce)$counts)
+  
+  pca <- prcomp(t(log1p(assays(sce)$norm)), scale. = FALSE)
+  rd1 <- pca$x[,1:2]
+  
+  rd2 <- uwot::umap(t(log1p(assays(sce)$norm)))
+  colnames(rd2) <- c('UMAP1', 'UMAP2')
+  reducedDims(sce) <- SimpleList(PCA = rd1, UMAP = rd2)
+  
+  cl1 <- Mclust(rd2)$classification
+  colData(sce)$GMM <- cl1
+  
+  cl2 <- kmeans(rd2, centers = 4)$cluster
+  colData(sce)$kmeans <- cl2
+  
+  sce <- slingshot(sce, clusterLabels = 'GMM', reducedDim = 'UMAP')
+  
+  time <- list()
+  i = 1
+  while (T) {
+    k <- sprintf("slingPseudotime_%d", i)
+    if (is.null(sce[[k]])) {
+      break
+    } else {
+      time[[sprintf("Pseudotime_%d", i)]] <- sce[[k]]
+    }
+    i <- i + 1
+  }
+  
+  time <- as.data.frame(time)
+  rownames(time) <- colnames(res$counts)
+  write.csv(time, file = file.path(root, "PseudoTime.csv"), quote = F)
+  
+  gp <- res$.grn$params
+  grn <- data.frame(
+    Gene1 = paste0("gene", gp[,2]),
+    Gene2 = paste0("gene", gp[,1]),
+    Type = ifelse(gp[,3] > 0, "+", "-"))
+  write.csv(grn, file = file.path(root, "refNetwork.csv"), quote = F, row.names = F)
+}
+
+
+output_integ_res <- function(conf) {
+  root <- .conf_path(conf, "integ3")
+  cat(sprintf("%s\n", root))
+  if (file.exists(.conf_path(conf, "integ/integ.rds"))) return()
+  
+  res <- read_res(conf)
+  dir.create(root, showWarnings = F)
+  cat("1", file = .conf_path(conf, "have_integ"), append = T)
+  
+  res$atac_counts <- .atac_intr_noise(res$atacseq_data)
+  add_expr_noise(res, alpha_mean = 0.15, atac.obs.prob = 0.5)
+  divide_batches(res, nbatch = 3)
+  
+  if (conf$tree == 1) {
+    mt <- res$cell_meta
+    new_pop <- rep("3", nrow(mt))
+    new_pop[mt$depth < (2/3)] <- "2"
+    new_pop[mt$depth < (1/3)] <- "1"
+    mt$pop <- new_pop
+  } else {
+    mt <- res$cell_meta
+  }
+  
+  data <- list(
+    counts_s = res$counts %>% t(),
+    atac = res$atac_counts %>% t(),
+    meta = mt,
+    counts_obs = res$counts_with_batches %>% t(),
+    atac_obs = res$atac_with_batches %>% t(),
+    region_to_gene = res$region_to_gene
+  )
+  
+  for (n in names(data)) {
+    d <- data[[n]]
+    fn <- n
+    write.csv(d, file = file.path(root, paste0(fn, ".csv")), quote = F)
+  }
+  saveRDS(data, file.path(root, "integ.rds"))
+}
+```
+
+## Output data
+
+```{r}
+for (conf in configs_all) {
+  if (res_exist(conf)) {
+    if (!cci_exist(conf)) {
+      output_cci_res(conf)
+    }
+    if (!grn_exist(conf)) {
+      output_grn_res(conf)
+    }
+    output_integ_res(conf)
+  }
+}
+```
+
+## Generate BEELINE config string
+
+```{r}
+create_grn_ds <- function() {
+  out <- ""
+  for (conf in configs1) {
+    if (!res_exist(conf)) next
+    if (conf$seed <= 2 || conf$ncells != 500) next
+    fd <- sprintf("tree%g_%g_cells%g_genes_sigma%g_%g",
+                  conf$tree, conf$ncells, conf$ngenes, conf$sigma, conf$seed)
+    str <- '        - name: "%s"
+          exprData: "ExpressionData.csv"
+          cellData: "PseudoTime.csv"
+          trueEdges: "refNetwork.csv"\n'
+    out <- paste0(out, sprintf(str, fd))
+  }
+  cat(out)
+}
+```

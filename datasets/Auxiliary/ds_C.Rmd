@@ -1,0 +1,83 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+```
+
+```{r}
+.output_cci_res <- function(res, root) {
+  dir.create(root, recursive = T)
+  write.csv(res$counts, file = file.path(root, "counts.csv"), quote = F)
+  write.csv(res$cell_meta, file = file.path(root, "cell_info.csv"), quote = F)
+  write.csv(res$grn_params, file = file.path(root, "grn.csv"), row.names = F, quote = F)
+  write.csv(res$cci_cell_type_param, file = file.path(root, "cci.csv"), row.names = F, quote = F)
+  write.csv(res$cci_locs, file = file.path(root, "locs.csv"), row.names = T, quote = F)
+  saveRDS(res, file.path(root, "res.rds"))
+}
+```
+
+```{r}
+(function() {
+  n_edges_1 = 110
+  
+  grn_params <- rbind(
+    data.frame(
+      target    = c(7:53, sample(7:53, n_edges_1 - length(7:53), replace = T)),
+      regulator = c(1:6, sample(1:6, n_edges_1 - length(1:6), replace = T)),
+      effect    = 5
+    ) %>% unique() %>% .[1:70,],
+    data.frame(
+      target    = 54:100,
+      regulator = 7:53,
+      effect    = 5
+    ),
+    data.frame(
+      target    = 110:156,
+      regulator = 54:100,
+      effect    = 5
+    )
+  )
+  
+  lig_params <- data.frame(
+    target    = c(1,   2,   3,   4,   5,   6),
+    regulator = c(101, 102, 103, 104, 105, 106),
+    effect    = 5
+  )
+  
+  ctp <- cci_cell_type_params(Phyla1(), 6, 3:6, 0.2, rand = F)
+  for (i in 3:5) {
+    for (j in 3:5) {
+      if (i == j) next
+      n_pairs <- sample(5:6, 1)
+      pairs <- sample(1:6, n_pairs)
+      for (p in pairs)
+        ctp$params[i, j, p] <- ctp$params[j, i, p] <- 1
+    }
+  }
+
+  foreach (seed = 9:12) %dopar% {
+    options_ <- list(
+      rand.seed = seed,
+      threads = 1,
+      GRN = grn_params,
+      num.genes = 160,
+      num.cells = 500,
+      num.cifs = 50,
+      tree = Phyla1(),
+      intrinsic.noise = 1,
+      cci = list(
+        params = lig_params,
+        max.neighbors = 4,
+        cell.type.interaction = ctp,
+        cell.type.lr.pairs = 3:6,
+        step.size = 0.2
+      ),
+      debug = F
+    )
+  
+    results <- sim_true_counts(options_)
+    .output_cci_res(results, "cci4_" %+% as.character(seed))
+    gc()
+  }
+})()
+```

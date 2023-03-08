@@ -1,0 +1,106 @@
+```{r}
+# setwd("/home/[USER]/scMultiSim")
+# devtools::load_all(".")
+library("scMultiSim")
+
+source("../../utils.R")
+library(Giotto)
+```
+
+
+```{r}
+run_giotto <- function(root_dir) {
+  path_to_matrix = file.path(root_dir, "giotto_counts.txt")
+  path_to_locations = file.path(root_dir, "giotto_loc.csv")
+  python_path = "/home/[USER]/.pyenv/versions/miniforge3-4.10.3-10/envs/scMultiSim/bin/python"
+  LR_data <- read.csv(file.path(root_dir, 'lrpair.csv'), row.name = 'X')[, 1:2]
+  meta <- read.csv(file.path(root_dir, 'cell_info.csv'), row.name = 'X')
+  
+  my_instructions = createGiottoInstructions(python_path = python_path)
+  go = createGiottoObject(raw_exprs = path_to_matrix,
+                          spatial_locs = path_to_locations,
+                          instructions = my_instructions)
+  
+  go <- addCellMetadata(go, meta$cell.type.idx, vector_name = "cell_types")
+  
+  # processing
+  go <- filterGiotto(gobject = go, 
+                     expression_threshold = 0.5, 
+                     gene_det_in_min_cells = 20, 
+                     min_det_genes_per_cell = 0)
+  go <- normalizeGiotto(gobject = go)
+  
+  # dimension reduction
+  go <- calculateHVG(gobject = go)
+  go <- runPCA(gobject = go, ncp = 50)
+  col <- min(5, ncol(go@dimension_reduction$cells$pca$pca$coordinates))
+  go <- runUMAP(go, dimensions_to_use = 1:col)
+  
+  # leiden clustering
+  # go = createNearestNetwork(go)
+  # go = doLeidenCluster(go, name = 'leiden_clus')
+  # 
+  go <- createSpatialKNNnetwork(go, name = "network",
+                               k = 100, maximum_distance = 1.01)
+  
+  # annotate
+  # metadata = pDataDT(go)
+  # uniq_clusters = length(unique(metadata$leiden_clus))
+  # 
+  # clusters_cell_types = paste0('cell ', LETTERS[1:uniq_clusters])
+  # names(clusters_cell_types) = 1:uniq_clusters
+  
+  # go = annotateGiotto(gobject = go, 
+  #                     annotation_vector = clusters_cell_types, 
+  #                     cluster_column = 'leiden_clus', 
+  #                     name = 'cell_types')
+  
+  expr_only_scores = exprCellCellcom(gobject = go,
+                                     cluster_column = 'cell_types',
+                                     random_iter = 500,
+                                     gene_set_1 = LR_data[, 1],
+                                     gene_set_2 = LR_data[, 2])
+  ## get statistical significance of gene pair expression changes upon cell-cell interaction
+  spatial_all_scores = spatCellCellcom(go,
+                                       spatial_network_name = 'network',
+                                       cluster_column = 'cell_types',
+                                       random_iter = 500,
+                                       gene_set_1 = LR_data[, 1],
+                                       gene_set_2 = LR_data[, 2],
+                                       adjust_method = 'fdr',
+                                       do_parallel = T,
+                                       cores = 4,
+                                       verbose = 'none')
+  
+  comb_comm = combCCcom(spatialCC = spatial_all_scores,
+                        exprCC = expr_only_scores)
+  
+  
+  res <- data.frame()
+  res_log2fc <- data.frame()
+  
+  for (i in 1:nrow(comb_comm)) {
+    lr <- comb_comm[[i, "LR_comb"]]
+    genes <- strsplit(comb_comm[[i, "LR_cell_comb"]], "--")[[1]]
+    gpair <- paste0("CT", genes[1], "-CT", genes[2])
+    res[lr, gpair] <- comb_comm[[i, "p.adj_spat"]]
+    res_log2fc[lr, gpair] <- comb_comm[[i, "PI_spat"]]
+  }
+  
+  list(res, res_log2fc)
+}
+```
+
+```{r}
+(\(){
+  for (conf in configs_all) {
+    if (!res_exist(conf)) next
+    root_dir <- .conf_path(conf, "cci")
+    if (file.exists(file.path(root_dir, "giotto_result.csv"))) next
+    print(root_dir)
+    res <- run_giotto(root_dir)
+    write.csv(1 - res[[1]], file.path(root_dir, "giotto_result.csv"))
+    write.csv(res[[2]], file.path(root_dir, "giotto_result_PI.csv"))
+  }
+})()
+```
