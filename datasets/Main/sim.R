@@ -1,10 +1,11 @@
-# setwd("/home/[USER]/scMultiSim")
-# devtools::load_all(".")
+# devtools::load_all("./scMultiSim")
 
 library("scMultiSim")
+library(dplyr)
+data(GRN_params_100)
 
 # Set your root directory to save data
-ROOT_DIR <- "./scMultiSim/unif/"
+ROOT_DIR <- "/results/main_ds"
 # ROOT_DIR <- "/home/[USER]/scMultiSim/bench/unif/1"
 
 .unif_fd <- function(conf) {
@@ -21,30 +22,29 @@ ROOT_DIR <- "./scMultiSim/unif/"
 
 configs1 <- expand.grid(
   tree = c(1),
-  ngenes = c(200, 500),
-  ncells = c(500),
+  ngenes = c(110, 200, 500),
+  ncells = c(500, 800),
   sigma = c(0.1, 0.5),
   seed = 1:4
 ) %>% split(., seq(nrow(.)))
 
 configs3 <- expand.grid(
   tree = c(3),
-  ngenes = c(500),
-  ncells = c(800),
+  ngenes = c(110, 200, 500),
+  ncells = c(500, 800),
   sigma = c(0.1, 0.5),
-  seed = 4
+  seed = 1:4
 ) %>% split(., seq(nrow(.)))
 
 configs5 <- expand.grid(
   tree = c(5),
   ngenes = c(110, 200, 500),
-  ncells = c(500),
+  ncells = c(500, 800),
   sigma = c(0.1, 0.5),
   seed = 1:4
 ) %>% split(., seq(nrow(.)))
 
-# Set config set; configs1=ML, configs3=MT, configs5=MD
-CURR_CONFIG <- configs1
+# configs1=ML, configs3=MT, configs5=MD
 
 # ==============================================================================
 
@@ -163,16 +163,29 @@ ctp1 <- (function(){
 
 .write_unif_dataset <- function(conf, res) {
   fd <- .unif_fd(conf)
-  saveRDS(res, file.path(fd, "res.rds"))
+  res_l <- list()
+  for (n in names(res)) {
+    # message(sprintf("Processing %s", n))
+    if (n == "cif" || n == "giv") {
+      res_l[[n]] <- "Removed due to large data size. Please generate it using the provided code or contact the author for more info."
+    } else {
+      res_l[[n]] <- res[[n]]
+    }
+  }
+  res_l[["atac_counts"]] <- .atacIntrNoise(res$atacseq_data, size = 5)
+  saveRDS(res_l, file.path(fd, "res.rds"))
 }
 
 cat("===========BEGIN==========\n")
 
 (function() {
   args <- commandArgs(trailingOnly=TRUE)
-  conf <- configs5[[as.integer(args[1])]]
+  print(args)
+  conf_set <- switch(args[1], "1" = configs1, "3" = configs3, "5" = configs5)
+  conf <- conf_set[[as.integer(args[2])]]
   print(.unif_fd(conf))
   res <- .sim_unif_dataset(conf)
+  print(res$counts[1:10])
   .write_unif_dataset(conf, res)
 })()
 

@@ -1,0 +1,125 @@
+## Generate Data
+
+```{r}
+sim_dir <- "~/scMultiSim/bench/integ/mmmb/sim"
+out_dir <- "~/scMultiSim/bench/integ/mmmb/res_seurat"
+
+write_files <- function(res, dataset_name, dir = "sim", prefix = NULL, suffix = NULL) {
+  if (is(res, "scMultiSim_output")) {
+    res <- res$res
+  }
+  
+  data <- list(
+    counts_s = res$counts %>% t(),
+    atac = res$atacseq_data %>% t(),
+    meta = res$cell_meta
+  )
+  
+  if ("unspliced_counts" %in% names(res)) {
+    data$counts_u <- res$unspliced_counts %>% t()
+    data$velo <- res$velocity %>% t()
+  }
+  
+  if ("counts_with_batches" %in% names(res)) {
+    data$counts_obs <- res$counts_with_batches %>% t()
+  }
+  
+  if ("atac_with_batches" %in% names(res)) {
+    data$atac_obs <- res$atac_with_batches %>% t()
+  }
+  
+  ds_path <- file.path(dir, dataset_name)
+  if (!file.exists(ds_path)) {
+    dir.create(ds_path, recursive = TRUE)
+  }
+  
+  for (n in names(data)) {
+    d <- data[[n]]
+    fn <- n
+    if (is.character(prefix)) {
+      fn <- paste0(prefix, "_", fn)
+    }
+    if (is.character(suffix)) {
+      fn <- paste0(fn, "_", suffix)
+    }
+    write.csv(d, file = file.path(ds_path, paste0(fn, ".csv")), quote = FALSE)
+  }
+  
+  saveRDS(res, file.path(ds_path, "res.rds"))
+  
+  res
+}
+```
+
+```{r} 
+(\(){
+  configs <- expand.grid(
+    ngenes = c(100, 200, 500),
+    ncells = c(500, 750, 1000),
+    seed = 1:4
+  ) %>% split(., seq(nrow(.)))
+  
+  gen_discrete <- function(ncells, ngenes, seed, tsne.seed = 0) {
+    tree10 <- ape::read.tree(text = '(A:1.0,B:1.0,C:1.0,D:1.0:,E:1.0,F:1.0,G:1.0,H:1.0,I:1.0,J:1.0);')
+    ds_name <- sprintf("dis_%dcells_%dgenes_%d", ncells, ngenes, seed)
+    
+    options_ <- list2(
+      rand.seed = seed,
+      num.cells = ncells * 3,
+      num.cifs = 500,
+      discrete.cif = T,
+      tree = tree10,
+      diff.cif.fraction = 0.8,
+      do.velocity = F
+    )
+    
+    if (ngenes == 100) {
+      options_$GRN <- GRN_params_100 
+    } else {
+      options_$num.genes <- ngenes
+      options_$GRN <- NA
+    }
+    
+    results <- sim_true_counts(options_)
+    add_expr_noise(results)
+    divide_batches(results, nbatch = 3)
+    
+    write_files(results, ds_name, dir = sim_dir)
+  }
+  
+  gen_cont <- function(ncells, ngenes, seed, tsne.seed = 0) {
+    ds_name <- sprintf("cont_%dcells_%dgenes_%d", ncells, ngenes, seed)
+    
+    options_ <- list2(
+      rand.seed = seed,
+      num.cells = ncells * 3,
+      num.cifs = 500,
+      tree = Phyla5(),
+      diff.cif.fraction = 0.8,
+      do.velocity = F
+    )
+    
+    if (ngenes == 100) {
+      options_$GRN <- GRN_params_100 
+    } else {
+      options_$num.genes <- ngenes
+      options_$GRN <- NA
+    }
+    
+    results <- sim_true_counts(options_)
+    add_expr_noise(results)
+    divide_batches(results, nbatch = 3)
+    
+    write_files(results, ds_name, dir = sim_dir)
+  }
+  
+  foreach (conf = configs) %dopar% {
+    c(ngenes, ncells, seed) %<-% conf
+    gen_discrete(ncells, ngenes, seed)
+    gen_cont(ncells, ngenes, seed)
+    gc()
+    NULL
+  }
+  
+})()
+```

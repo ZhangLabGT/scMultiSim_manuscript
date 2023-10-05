@@ -77,6 +77,8 @@ library(mclust, quietly = TRUE)
 
 ## Simulation
 
+Datasets with 110 genes
+
 ```{r}
 library(doParallel)
 registerDoParallel(cores = 8)
@@ -121,6 +123,57 @@ registerDoParallel(cores = 8)
     divide_batches(results)
 
     .output_grn_res(results, "/home/[USER]/scMultiSim/bench/grn/r0.2/grn100_noise_" %+% as.character(seed), T)
+    gc()
+  }
+})()
+
+```
+
+Large datasets with 500 genes
+
+```{r}
+(function() {
+  foreach (seed = 1:8) %dopar% {
+    options_ <- list(
+      rand.seed = seed,
+      threads = 1,
+      GRN = GRN_params_100,
+      num.genes = 500,
+      num.cells = 1000,
+      num.cifs = 50,
+      tree = Phyla1(),
+      intrinsic.noise = 1,
+      diff.cif.fraction = 0.2,
+      debug = F
+    )
+
+    results <- sim_true_counts(options_)
+
+    .output_grn_res(results, "/home/[USER]/scMultiSim/bench/grn/large/grn100_" %+% as.character(seed), F)
+    gc()
+  }
+})()
+
+(function() {
+  foreach (seed = 1:8) %dopar% {
+    options_ <- list(
+      rand.seed = seed,
+      threads = 1,
+      GRN = GRN_params_100,
+      num.genes = 500,
+      num.cells = 1000,
+      num.cifs = 50,
+      tree = Phyla1(),
+      intrinsic.noise = 1,
+      diff.cif.fraction = 0.2,
+      debug = F
+    )
+
+    results <- sim_true_counts(options_)
+    add_expr_noise(results)
+    divide_batches(results)
+
+    .output_grn_res(results, "/home/[USER]/scMultiSim/bench/grn/large/grn100_noise_" %+% as.character(seed), T)
     gc()
   }
 })()
